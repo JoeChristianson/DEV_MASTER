@@ -56,41 +56,125 @@ jobs:
             // ---- Inputs & defaults ----
             const i = context.payload.inputs;
             const DEFAULT_FILE = 'docs/developer-sop-library.md';
-            const DEFAULT_BRANCH = 'main';
 
-            const sopNum = i.sop_number.trim();
-            const title = i.title.trim();
-            const category = i.category.trim();
-            const triggerTxt = i.trigger.trim();
-            const stepsRaw = i.steps_md.trim();
-            const notesRaw = (i.notes_md || "").trim();
+            const sopNum = (i.sop_number || '').trim();
+            const title = (i.title || '').trim();
+            const category = (i.category || '').trim();
+            const triggerTxt = (i.trigger || '').trim();
+            const stepsRaw = (i.steps_md || '').trim();
+            const notesRaw = (i.notes_md || '').trim();
             const estMinutes = parseInt(i.est_time_minutes, 10);
-            const automation = i.automation_opportunity.trim();
-            const status = i.status.trim();
+            const automation = (i.automation_opportunity || '').trim();
+            const status = (i.status || '').trim();
             const filePath = DEFAULT_FILE;
 
             // frequency: "<count>/<period>"
             const freqMatch = (i.frequency || '').trim().match(/^(\d+)\s*\/\s*(day|week|month)$/i);
             if (!freqMatch) {
-              core.setFailed('frequency must be formatted like "10/week", "2/day", or "5/month"');
+              core.setFailed('frequency must be "10/week", "2/day", or "5/month"');
               return;
             }
             const freqCount = parseInt(freqMatch[1], 10);
             const freqPeriod = freqMatch[2].toLowerCase();
 
             // ---- Validation ----
-            if (!/DEV-SOP-\d{3,}/.test(sopNum)) {
-              core.setFailed(`Invalid sop_number: ${sopNum} (expected DEV-SOP-###)`);
+            if (!/^DEV-SOP-\d{3,}$/.test(sopNum)) {
+              core.setFailed('Invalid sop_number (expected DEV-SOP-###)');
               return;
             }
             if (Number.isNaN(estMinutes) || Number.isNaN(freqCount)) {
               core.setFailed('est_time_minutes and frequency count must be integers');
               return;
             }
-            if (!['day','week','month'].includes(freqPeriod)) {
-              core.setFailed(`frequency period must be one of: day | week | month`);
+            if (['day','week','month'].indexOf(freqPeriod) === -1) {
+              core.setFailed('frequency period must be one of: day | week | month');
               return;
             }
 
             // ---- Calculations ----
-            const periodFactor = freqPeriod === 'day' ? 30 : (freqPeriod === 'wee
+            const periodFactor = freqPeriod === 'day' ? 30 : (freqPeriod === 'week' ? 4 : 1);
+            const totalMonthly = estMinutes * freqCount * periodFactor; // minutes
+            const totalMonthlyStr = (totalMonthly > 0)
+              ? (Math.floor(totalMonthly/60) + 'h ' + (totalMonthly%60) + 'm')
+              : '0h 0m';
+
+            // ---- Ensure file ----
+            if (!fs.existsSync(filePath)) {
+              fs.mkdirSync(path.dirname(filePath), { recursive: true });
+              const starter =
+                '# Developer SOP Library\n\n' +
+                '## Index Table\n' +
+                '| SOP #        | Title                                     | Category  | Frequency | Est. Time Savings | Total Monthly Time Saved |\n' +
+                '|--------------|-------------------------------------------|-----------|-----------|-------------------|--------------------------|\n' +
+                '\n***\n\n';
+              fs.writeFileSync(filePath, starter, 'utf8');
+            }
+
+            let md = fs.readFileSync(filePath, 'utf8');
+
+            // ---- Helpers ----
+            const escPipes = (s) => s.replace(/\|/g, '\\|');
+            const freqDisplay = '~' + freqCount + ' per ' + freqPeriod;
+            const estDisplay = '~' + estMinutes + ' min';
+            const row = '| ' + sopNum + '  | ' + escPipes(title) + '  | ' + escPipes(category) + '  | ' + escPipes(freqDisplay) + ' | ' + escPipes(estDisplay) + ' | ' + escPipes(totalMonthlyStr) + ' |';
+
+            // Ensure Index Table exists
+            if (!/## Index Table/.test(md)) {
+              const headerBlock =
+                '## Index Table\n' +
+                '| SOP #        | Title                                     | Category  | Frequency | Est. Time Savings | Total Monthly Time Saved |\n' +
+                '|--------------|-------------------------------------------|-----------|-----------|-------------------|--------------------------|\n';
+              md = md.replace(/^# Developer SOP Library\s*\n?/, function(m){ return m + '\n' + headerBlock + '\n***\n'; });
+            }
+
+            // Insert/replace row in Index Table
+            const tableFullRe = /## Index Table[\s\S]*?(\n\*{3}\n|$)/;
+            const reEscape = function(s){ return s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&'); };
+            const rowRe = new RegExp('^\\|\\s*' + reEscape(sopNum) + '\\s*\\|.*$', 'm');
+
+            if (rowRe.test(md)) {
+              md = md.replace(rowRe, row);
+            } else {
+              md = md.replace(tableFullRe, function(block){
+                return block.replace(/\n\*{3}\n|$/, function(sep){ return '\n' + row + '\n' + sep; });
+              });
+            }
+
+            // ---- Build section ----
+            const steps = stepsRaw.split(/\r?\n/).filter(Boolean).map(function(s, i){
+              return (i+1) + '. ' + s.trim();
+            }).join('\n');
+
+            const notes = (notesRaw.length
+              ? notesRaw.split(/\r?\n/).filter(Boolean).map(function(s){ return '- ' + s.trim(); }).join('\n')
+              : '-');
+
+            const sopSectionArr = [];
+            sopSectionArr.push('## ' + sopNum + ': ' + title);
+            sopSectionArr.push('**Category:** ' + category + '  ');
+            sopSectionArr.push('**Trigger:** ' + triggerTxt + '  ');
+            sopSectionArr.push('');
+            sopSectionArr.push('**Steps:**  ');
+            sopSectionArr.push(steps);
+            sopSectionArr.push('');
+            sopSectionArr.push('**Notes & Optimizations:**  ');
+            sopSectionArr.push(notes);
+            sopSectionArr.push('');
+            sopSectionArr.push('**Estimated Time Savings:** ~' + estMinutes + ' minutes per occurrence  ');
+            sopSectionArr.push('**Frequency:** ' + freqDisplay + '  ');
+            sopSectionArr.push('**Automation Opportunity:** ' + automation + '  ');
+            sopSectionArr.push('**Status:** ' + status);
+            const sopSection = '\n' + sopSectionArr.join('\n') + '\n';
+
+            const sectionRe = new RegExp('##\\s+' + reEscape(sopNum) + ':[\\s\\S]*?(?=\\n##\\s+DEV-SOP-|$)', 'm');
+            if (sectionRe.test(md)) {
+              md = md.replace(sectionRe, sopSection.trim());
+            } else {
+              if (!/\n\*{3}\n/.test(md)) md += '\n\n***\n';
+              md = md.replace(/\s*$/, '\n' + sopSection + '\n');
+            }
+
+            fs.writeFileSync(filePath, md, 'utf8');
+            core.setOutput('file', filePath);
+            core.setOutput('monthly_minutes', String(totalMonthly));
+            core.setOutput('monthly_hm', totalMonthlyStr);
