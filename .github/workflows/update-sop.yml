@@ -1,20 +1,24 @@
-name: Update SOP Library
+name: Update SOP Library (via JSON → PR)
 
 on:
   workflow_dispatch:
     inputs:
       payload:
-        description: 'JSON payload with SOP data (see example below)'
+        description: 'JSON payload with SOP data'
         required: true
 
 jobs:
   update-sop:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
 
       - name: Apply SOP update
         id: apply
@@ -35,7 +39,6 @@ jobs:
 
             // ---- Defaults ----
             const DEFAULT_FILE = 'docs/developer-sop-library.md';
-            const DEFAULT_BRANCH = 'main';
 
             // ---- Destructure with fallbacks ----
             const sopNum = (data.sop_number || '').trim();
@@ -52,7 +55,7 @@ jobs:
             let freqCount, freqPeriod;
             if (typeof data.frequency === 'string') {
               const m = data.frequency.trim().match(/^(\d+)\s*\/\s*(day|week|month)$/i);
-              if (!m) return core.setFailed('frequency string must be like "10/week" or "2/day" or "5/month"');
+              if (!m) return core.setFailed('frequency string must be like "10/week", "2/day", or "5/month"');
               freqCount = parseInt(m[1], 10);
               freqPeriod = m[2].toLowerCase();
             } else if (data.frequency && typeof data.frequency === 'object') {
@@ -63,21 +66,16 @@ jobs:
             }
 
             const filePath = (data.file_path || DEFAULT_FILE).trim();
-            const branch = (data.branch || DEFAULT_BRANCH).trim();
 
             // ---- Validation ----
-            if (!/^DEV-SOP-\d{3,}$/.test(sopNum)) {
-              return core.setFailed('Invalid sop_number (expected DEV-SOP-###)');
-            }
+            if (!/^DEV-SOP-\d{3,}$/.test(sopNum)) return core.setFailed('Invalid sop_number (expected DEV-SOP-###)');
             if (!title) return core.setFailed('title is required');
             if (!category) return core.setFailed('category is required');
             if (!triggerTxt) return core.setFailed('trigger is required');
             if (!stepsArr.length) return core.setFailed('steps must be a non-empty array of strings');
             if (Number.isNaN(estMinutes)) return core.setFailed('est_time_minutes must be an integer');
             if (Number.isNaN(freqCount)) return core.setFailed('frequency.count must be an integer');
-            if (['day','week','month'].indexOf(freqPeriod) === -1) {
-              return core.setFailed('frequency.period must be one of: day | week | month');
-            }
+            if (['day','week','month'].indexOf(freqPeriod) === -1) return core.setFailed('frequency.period must be one of: day | week | month');
 
             // ---- Calculations ----
             const periodFactor = freqPeriod === 'day' ? 30 : (freqPeriod === 'week' ? 4 : 1);
@@ -159,14 +157,20 @@ jobs:
             }
 
             fs.writeFileSync(filePath, md, 'utf8');
-            core.setOutput('file', filePath);
-            core.setOutput('monthly_minutes', String(totalMonthly));
-            core.setOutput('monthly_hm', totalMonthlyStr);
 
-      - name: Commit & push
+      - name: Create feature branch and commit
         run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          BRANCH="sop/${{ github.run_id }}"
+          git checkout -b "$BRANCH"
           git add "docs/developer-sop-library.md"
           git commit -m "chore(sop): update via JSON payload" || echo "No changes to commit"
-          git push origin main
+          git push -u origin "$BRANCH"
+
+      - name: Open PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          base: main
+          branch: sop/${{ github.run_id }}
+          title: "chore(sop): update via JSON payload"
+          body: "Automated SOP update from workflow run ${{ github.run_id }}."
+          commit-message: "chore(sop): update via JSON payload"
