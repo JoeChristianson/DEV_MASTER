@@ -25,13 +25,9 @@ on:
       est_time_minutes:
         description: 'Estimated time savings per occurrence (minutes, integer)'
         required: true
-      frequency_count:
-        description: 'How many times per period (integer)'
+      frequency:
+        description: 'Format: <count>/<period> where period is day|week|month. Example: 10/week'
         required: true
-      frequency_period:
-        description: 'day | week | month'
-        required: true
-        default: 'week'
       automation_opportunity:
         description: 'Yes/No + brief idea'
         required: true
@@ -39,14 +35,6 @@ on:
         description: 'Draft | Finalized'
         required: true
         default: 'Draft'
-      file_path:
-        description: 'Markdown file path'
-        required: true
-        default: 'docs/developer-sop-library.md'
-      default_branch:
-        description: 'Branch to commit to'
-        required: true
-        default: 'main'
 
 jobs:
   update-sop:
@@ -55,7 +43,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.default_branch }}
+          ref: main
 
       - name: Apply SOP update
         id: apply
@@ -65,141 +53,44 @@ jobs:
             const fs = require('fs');
             const path = require('path');
 
-            const inputs = context.payload.inputs;
-            const filePath = inputs.file_path;
-            const sopNum = inputs.sop_number.trim();
-            const title = inputs.title.trim();
-            const category = inputs.category.trim();
-            const triggerTxt = inputs.trigger.trim();
-            const stepsRaw = inputs.steps_md.trim();
-            const notesRaw = inputs.notes_md || "";
-            const estMinutes = parseInt(inputs.est_time_minutes, 10);
-            const freqCount = parseInt(inputs.frequency_count, 10);
-            const freqPeriod = (inputs.frequency_period || 'week').toLowerCase().trim();
-            const autoOpp = inputs.automation_opportunity.trim();
-            const status = inputs.status.trim();
-            const defaultBranch = inputs.default_branch;
+            // ---- Inputs & defaults ----
+            const i = context.payload.inputs;
+            const DEFAULT_FILE = 'docs/developer-sop-library.md';
+            const DEFAULT_BRANCH = 'main';
 
+            const sopNum = i.sop_number.trim();
+            const title = i.title.trim();
+            const category = i.category.trim();
+            const triggerTxt = i.trigger.trim();
+            const stepsRaw = i.steps_md.trim();
+            const notesRaw = (i.notes_md || "").trim();
+            const estMinutes = parseInt(i.est_time_minutes, 10);
+            const automation = i.automation_opportunity.trim();
+            const status = i.status.trim();
+            const filePath = DEFAULT_FILE;
+
+            // frequency: "<count>/<period>"
+            const freqMatch = (i.frequency || '').trim().match(/^(\d+)\s*\/\s*(day|week|month)$/i);
+            if (!freqMatch) {
+              core.setFailed('frequency must be formatted like "10/week", "2/day", or "5/month"');
+              return;
+            }
+            const freqCount = parseInt(freqMatch[1], 10);
+            const freqPeriod = freqMatch[2].toLowerCase();
+
+            // ---- Validation ----
             if (!/DEV-SOP-\d{3,}/.test(sopNum)) {
               core.setFailed(`Invalid sop_number: ${sopNum} (expected DEV-SOP-###)`);
               return;
             }
-            if (!['day','week','month'].includes(freqPeriod)) {
-              core.setFailed(`frequency_period must be one of: day | week | month`);
-              return;
-            }
             if (Number.isNaN(estMinutes) || Number.isNaN(freqCount)) {
-              core.setFailed('est_time_minutes and frequency_count must be integers');
+              core.setFailed('est_time_minutes and frequency count must be integers');
+              return;
+            }
+            if (!['day','week','month'].includes(freqPeriod)) {
+              core.setFailed(`frequency period must be one of: day | week | month`);
               return;
             }
 
-            // monthly factor
-            const periodFactor = freqPeriod === 'day' ? 30 : (freqPeriod === 'week' ? 4 : 1);
-            const totalMonthly = estMinutes * freqCount * periodFactor; // in minutes
-            const totalMonthlyStr = totalMonthly > 0
-              ? `${Math.floor(totalMonthly/60)}h ${totalMonthly%60}m`
-              : '0h 0m';
-
-            // Ensure file exists; if not, initialize with starter
-            if (!fs.existsSync(filePath)) {
-              fs.mkdirSync(path.dirname(filePath), { recursive: true });
-              const starter = `# Developer SOP Library
-
-              ## Index Table
-              | SOP #        | Title                                     | Category  | Frequency | Est. Time Savings | Total Monthly Time Saved |
-              |--------------|-------------------------------------------|-----------|-----------|-------------------|--------------------------|
-
-              ---
-
-              `;
-              fs.writeFileSync(filePath, starter, 'utf8');
-            }
-
-            let md = fs.readFileSync(filePath, 'utf8');
-
-            // Helpers
-            const esc = (s) => s.replace(/\|/g, '\\|');
-            const freqDisplay = `~${freqCount} per ${freqPeriod}`;
-            const estDisplay = `~${estMinutes} min`;
-            const row = `| ${sopNum}  | ${esc(title)}  | ${esc(category)}  | ${esc(freqDisplay)} | ${esc(estDisplay)} | ${esc(totalMonthlyStr)} |`;
-
-            // Insert/replace row in Index Table
-            const tableHeaderRe = /## Index Table\s*\n\| SOP #\s*\|[\s\S]*?\n\|[-| ]+\|\s*\n/;
-            const tableFullRe = /## Index Table[\s\S]*?(\n---\n|$)/;
-
-            if (!/## Index Table/.test(md)) {
-              // create Index Table at top if missing
-              const headerBlock = `## Index Table
-              | SOP #        | Title                                     | Category  | Frequency | Est. Time Savings | Total Monthly Time Saved |
-              |--------------|-------------------------------------------|-----------|-----------|-------------------|--------------------------|
-              `;
-              md = md.replace(/^# Developer SOP Library\s*\n?/, (m)=> `${m}\n${headerBlock}\n---\n`);
-            }
-
-            // If row for sopNum exists, replace; else append above the separator (---)
-            const rowRe = new RegExp(`^\\|\\s*${sopNum}\\s*\\|.*$`, 'm');
-            if (rowRe.test(md)) {
-              md = md.replace(rowRe, row);
-            } else {
-              md = md.replace(tableFullRe, (block) => {
-                return block.replace(/\n---\n|$/, (sep) => `\n${row}\n${sep}`);
-              });
-            }
-
-            // Build SOP section
-            const steps = stepsRaw.split(/\r?\n/).filter(Boolean).map((s,i)=> `${i+1}. ${s.trim()}`).join('\n');
-            const notes = notesRaw.trim()
-              ? notesRaw.split(/\r?\n/).filter(Boolean).map(s=> `- ${s.trim()}`).join('\n')
-              : '-';
-
-            const anchor = sopNum.toLowerCase().replace(/[^a-z0-9]+/g,'-');
-            const sopSection = `
-            ## ${sopNum}: ${title}
-            **Category:** ${category}  
-            **Trigger:** ${triggerTxt}  
-
-            **Steps:**  
-            ${steps}
-
-            **Notes & Optimizations:**  
-            ${notes}
-
-            **Estimated Time Savings:** ~${estMinutes} minutes per occurrence  
-            **Frequency:** ${freqDisplay}  
-            **Automation Opportunity:** ${autoOpp}  
-            **Status:** ${status}
-            `;
-
-            // If section exists, replace it; else append at end
-            const sectionRe = new RegExp(`##\\s+${sopNum}:[\\s\\S]*?(?=\\n##\\s+DEV-SOP-|$)`, 'm');
-            if (sectionRe.test(md)) {
-              md = md.replace(sectionRe, sopSection.trim());
-            } else {
-              // Ensure a top-level title exists
-              if (!/^# Developer SOP Library/m.test(md)) {
-                md = `# Developer SOP Library\n\n${md}`;
-              }
-              // Append after last line, ensure there is a divider before sections if missing
-              if (!/\n---\n/.test(md)) {
-                md = md + `\n\n---\n`;
-              }
-              md = md.replace(/\s*$/, `\n${sopSection}\n`);
-            }
-
-            fs.writeFileSync(filePath, md, 'utf8');
-
-            core.setOutput('file', filePath);
-            core.setOutput('monthly_minutes', String(totalMonthly));
-            core.setOutput('monthly_hm', totalMonthlyStr);
-
-      - name: Commit & push
-        run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
-          git add "${{ github.event.inputs.file_path }}"
-          git commit -m "chore(sop): update ${{
-            github.event.inputs.sop_number
-          }} - ${{
-            github.event.inputs.title
-          }}"
-          git push origin "${{ github.event.inputs.default_branch }}"
+            // ---- Calculations ----
+            const periodFactor = freqPeriod === 'day' ? 30 : (freqPeriod === 'wee
