@@ -3,38 +3,9 @@ name: Update SOP Library
 on:
   workflow_dispatch:
     inputs:
-      sop_number:
-        description: 'e.g., DEV-SOP-001'
+      payload:
+        description: 'JSON payload with SOP data (see example below)'
         required: true
-      title:
-        description: 'Short title'
-        required: true
-      category:
-        description: 'Debugging | Git Workflow | Testing | Automation | Deployment | Other'
-        required: true
-      trigger:
-        description: 'When this SOP applies'
-        required: true
-      steps_md:
-        description: "Steps (one per line). They'll be numbered."
-        required: true
-      notes_md:
-        description: "Notes & Optimizations (optional; one bullet per line)"
-        required: false
-        default: ""
-      est_time_minutes:
-        description: 'Estimated time savings per occurrence (minutes, integer)'
-        required: true
-      frequency:
-        description: 'Format: <count>/<period> where period is day|week|month. Example: 10/week'
-        required: true
-      automation_opportunity:
-        description: 'Yes/No + brief idea'
-        required: true
-      status:
-        description: 'Draft | Finalized'
-        required: true
-        default: 'Draft'
 
 jobs:
   update-sop:
@@ -53,42 +24,59 @@ jobs:
             const fs = require('fs');
             const path = require('path');
 
-            // ---- Inputs & defaults ----
-            const i = context.payload.inputs;
-            const DEFAULT_FILE = 'docs/developer-sop-library.md';
-
-            const sopNum = (i.sop_number || '').trim();
-            const title = (i.title || '').trim();
-            const category = (i.category || '').trim();
-            const triggerTxt = (i.trigger || '').trim();
-            const stepsRaw = (i.steps_md || '').trim();
-            const notesRaw = (i.notes_md || '').trim();
-            const estMinutes = parseInt(i.est_time_minutes, 10);
-            const automation = (i.automation_opportunity || '').trim();
-            const status = (i.status || '').trim();
-            const filePath = DEFAULT_FILE;
-
-            // frequency: "<count>/<period>"
-            const freqMatch = (i.frequency || '').trim().match(/^(\d+)\s*\/\s*(day|week|month)$/i);
-            if (!freqMatch) {
-              core.setFailed('frequency must be "10/week", "2/day", or "5/month"');
+            // ---- Parse JSON payload ----
+            let data;
+            try {
+              data = JSON.parse(context.payload.inputs.payload);
+            } catch (e) {
+              core.setFailed('Payload is not valid JSON: ' + e.message);
               return;
             }
-            const freqCount = parseInt(freqMatch[1], 10);
-            const freqPeriod = freqMatch[2].toLowerCase();
+
+            // ---- Defaults ----
+            const DEFAULT_FILE = 'docs/developer-sop-library.md';
+            const DEFAULT_BRANCH = 'main';
+
+            // ---- Destructure with fallbacks ----
+            const sopNum = (data.sop_number || '').trim();
+            const title = (data.title || '').trim();
+            const category = (data.category || '').trim();
+            const triggerTxt = (data.trigger || '').trim();
+            const stepsArr = Array.isArray(data.steps) ? data.steps : [];
+            const notesArr = Array.isArray(data.notes) ? data.notes : [];
+            const estMinutes = parseInt(data.est_time_minutes, 10);
+            const automation = (data.automation_opportunity || '').trim();
+            const status = (data.status || 'Draft').trim();
+
+            // frequency: allow {count, period} or "count/period"
+            let freqCount, freqPeriod;
+            if (typeof data.frequency === 'string') {
+              const m = data.frequency.trim().match(/^(\d+)\s*\/\s*(day|week|month)$/i);
+              if (!m) return core.setFailed('frequency string must be like "10/week" or "2/day" or "5/month"');
+              freqCount = parseInt(m[1], 10);
+              freqPeriod = m[2].toLowerCase();
+            } else if (data.frequency && typeof data.frequency === 'object') {
+              freqCount = parseInt(data.frequency.count, 10);
+              freqPeriod = String(data.frequency.period || '').toLowerCase();
+            } else {
+              return core.setFailed('frequency must be provided (string "10/week" or object {count, period})');
+            }
+
+            const filePath = (data.file_path || DEFAULT_FILE).trim();
+            const branch = (data.branch || DEFAULT_BRANCH).trim();
 
             // ---- Validation ----
             if (!/^DEV-SOP-\d{3,}$/.test(sopNum)) {
-              core.setFailed('Invalid sop_number (expected DEV-SOP-###)');
-              return;
+              return core.setFailed('Invalid sop_number (expected DEV-SOP-###)');
             }
-            if (Number.isNaN(estMinutes) || Number.isNaN(freqCount)) {
-              core.setFailed('est_time_minutes and frequency count must be integers');
-              return;
-            }
+            if (!title) return core.setFailed('title is required');
+            if (!category) return core.setFailed('category is required');
+            if (!triggerTxt) return core.setFailed('trigger is required');
+            if (!stepsArr.length) return core.setFailed('steps must be a non-empty array of strings');
+            if (Number.isNaN(estMinutes)) return core.setFailed('est_time_minutes must be an integer');
+            if (Number.isNaN(freqCount)) return core.setFailed('frequency.count must be an integer');
             if (['day','week','month'].indexOf(freqPeriod) === -1) {
-              core.setFailed('frequency period must be one of: day | week | month');
-              return;
+              return core.setFailed('frequency.period must be one of: day | week | month');
             }
 
             // ---- Calculations ----
@@ -98,7 +86,7 @@ jobs:
               ? (Math.floor(totalMonthly/60) + 'h ' + (totalMonthly%60) + 'm')
               : '0h 0m';
 
-            // ---- Ensure file ----
+            // ---- Ensure file exists ----
             if (!fs.existsSync(filePath)) {
               fs.mkdirSync(path.dirname(filePath), { recursive: true });
               const starter =
@@ -114,6 +102,7 @@ jobs:
 
             // ---- Helpers ----
             const escPipes = (s) => s.replace(/\|/g, '\\|');
+            const reEscape = (s) => s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
             const freqDisplay = '~' + freqCount + ' per ' + freqPeriod;
             const estDisplay = '~' + estMinutes + ' min';
             const row = '| ' + sopNum + '  | ' + escPipes(title) + '  | ' + escPipes(category) + '  | ' + escPipes(freqDisplay) + ' | ' + escPipes(estDisplay) + ' | ' + escPipes(totalMonthlyStr) + ' |';
@@ -129,9 +118,7 @@ jobs:
 
             // Insert/replace row in Index Table
             const tableFullRe = /## Index Table[\s\S]*?(\n\*{3}\n|$)/;
-            const reEscape = function(s){ return s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&'); };
             const rowRe = new RegExp('^\\|\\s*' + reEscape(sopNum) + '\\s*\\|.*$', 'm');
-
             if (rowRe.test(md)) {
               md = md.replace(rowRe, row);
             } else {
@@ -141,30 +128,27 @@ jobs:
             }
 
             // ---- Build section ----
-            const steps = stepsRaw.split(/\r?\n/).filter(Boolean).map(function(s, i){
-              return (i+1) + '. ' + s.trim();
-            }).join('\n');
+            const steps = stepsArr.map(function(s, i){ return (i+1) + '. ' + String(s).trim(); }).join('\n');
+            const notes = notesArr.length
+              ? notesArr.map(function(s){ return '- ' + String(s).trim(); }).join('\n')
+              : '-';
 
-            const notes = (notesRaw.length
-              ? notesRaw.split(/\r?\n/).filter(Boolean).map(function(s){ return '- ' + s.trim(); }).join('\n')
-              : '-');
-
-            const sopSectionArr = [];
-            sopSectionArr.push('## ' + sopNum + ': ' + title);
-            sopSectionArr.push('**Category:** ' + category + '  ');
-            sopSectionArr.push('**Trigger:** ' + triggerTxt + '  ');
-            sopSectionArr.push('');
-            sopSectionArr.push('**Steps:**  ');
-            sopSectionArr.push(steps);
-            sopSectionArr.push('');
-            sopSectionArr.push('**Notes & Optimizations:**  ');
-            sopSectionArr.push(notes);
-            sopSectionArr.push('');
-            sopSectionArr.push('**Estimated Time Savings:** ~' + estMinutes + ' minutes per occurrence  ');
-            sopSectionArr.push('**Frequency:** ' + freqDisplay + '  ');
-            sopSectionArr.push('**Automation Opportunity:** ' + automation + '  ');
-            sopSectionArr.push('**Status:** ' + status);
-            const sopSection = '\n' + sopSectionArr.join('\n') + '\n';
+            const sopSection =
+              '\n' +
+              '## ' + sopNum + ': ' + title + '\n' +
+              '**Category:** ' + category + '  ' + '\n' +
+              '**Trigger:** ' + triggerTxt + '  ' + '\n' +
+              '\n' +
+              '**Steps:**  ' + '\n' +
+              steps + '\n' +
+              '\n' +
+              '**Notes & Optimizations:**  ' + '\n' +
+              notes + '\n' +
+              '\n' +
+              '**Estimated Time Savings:** ~' + estMinutes + ' minutes per occurrence  ' + '\n' +
+              '**Frequency:** ' + freqDisplay + '  ' + '\n' +
+              '**Automation Opportunity:** ' + automation + '  ' + '\n' +
+              '**Status:** ' + status + '\n';
 
             const sectionRe = new RegExp('##\\s+' + reEscape(sopNum) + ':[\\s\\S]*?(?=\\n##\\s+DEV-SOP-|$)', 'm');
             if (sectionRe.test(md)) {
@@ -178,3 +162,11 @@ jobs:
             core.setOutput('file', filePath);
             core.setOutput('monthly_minutes', String(totalMonthly));
             core.setOutput('monthly_hm', totalMonthlyStr);
+
+      - name: Commit & push
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git add "docs/developer-sop-library.md"
+          git commit -m "chore(sop): update via JSON payload" || echo "No changes to commit"
+          git push origin main
